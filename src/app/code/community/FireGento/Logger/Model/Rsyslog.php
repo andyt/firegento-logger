@@ -27,7 +27,7 @@ require_once 'rsyslog/rsyslog.php';
  * @package  FireGento_Logger
  * @author   FireGento Team <team@firegento.com>
  */
-class FireGento_Logger_Model_Rsyslog extends Zend_Log_Writer_Abstract
+class FireGento_Logger_Model_Rsyslog extends FireGento_Logger_Model_Abstract
 {
     /**
      * @var int The default Timeout to be used when communicating with the Remote Syslog Server.
@@ -67,21 +67,6 @@ class FireGento_Logger_Model_Rsyslog extends Zend_Log_Writer_Abstract
      * @var array Contains configuration options.
      */
     protected $_options = array();
-
-    /**
-     * @var bool Indicates if backtrace should be added to the Log Message.
-     */
-    protected $_enableBacktrace = false;
-
-    /**
-     * Setter for _enableBacktrace field.
-     *
-     * @param bool $flag The value to assign to the field.
-     */
-    public function setEnableBacktrace($flag)
-    {
-        $this->_enableBacktrace = $flag;
-    }
 
     /**
      * Builds and returns the full URL where the Log messages will be sent.
@@ -177,19 +162,11 @@ class FireGento_Logger_Model_Rsyslog extends Zend_Log_Writer_Abstract
     protected function _write($event)
     {
         $event = Mage::helper('firegento_logger')->getEventObjectFromArray($event);
-
+        if(!$event->getTimestamp()) {
+            $event->setTimestamp(now());
+        }
         $message = $this->buildSysLogMessage($event);
         return $this->publishMessage($message);
-    }
-
-    /**
-     * Satisfy newer Zend Framework
-     *
-     * @param  array|Zend_Config $config Configuration
-     * @return void|Zend_Log_FactoryInterface
-     */
-    public static function factory($config)
-    {
     }
 
 }

@@ -30,15 +30,37 @@ class FireGento_Logger_Helper_Data extends Mage_Core_Helper_Abstract
     const XML_PATH_PRIORITY = 'general/priority';
     const XML_PATH_MAX_DAYS = 'db/max_days_to_keep';
 
-    /**
-     * @var null
-     */
-    protected $_targetMap = null;
+    protected $_targets;
+    protected $_targetMap;
+    protected $_notificationRules;
+    protected $_maxBacktraceLines;
+    protected $_maxDataLength;
+    protected $_prettyPrint;
+    protected $_addSessionData;
+    protected $_keysToFilter;
+
+    public function __construct()
+    {
+        $this->_maxBacktraceLines = (int) $this->getLoggerConfig('general/max_backtrace_lines');
+        $this->_maxDataLength = $this->getLoggerConfig('general/max_data_length') ?: 1000;
+        $this->_prettyPrint = $this->getLoggerConfig('general/pretty_print') && defined('JSON_PRETTY_PRINT') ? JSON_PRETTY_PRINT : 0;
+        $this->_addSessionData = $this->getLoggerConfig('general/add_session_data');
+        $this->_keysToFilter = explode("\n", $this->getLoggerConfig('general/filter_request_data'));
+    }
 
     /**
-     * @var null
+     * Return a random id for this request
      */
-    protected $_notificationRules = null;
+    public function getRequestId()
+    {
+        if ( ! Mage::registry('logger_request_id')) {
+            try {
+                $requestId = preg_replace('/\W/','',base64_encode(random_bytes(6)));
+                Mage::register('logger_request_id', $requestId);
+            } catch (Exception $e) {}
+        }
+        return Mage::registry('logger_request_id');
+    }
 
     /**
      * Get logger config value
@@ -48,7 +70,19 @@ class FireGento_Logger_Helper_Data extends Mage_Core_Helper_Abstract
      */
     public function getLoggerConfig($path)
     {
+        // Do not use Mage::getStoreConfig so that logger may work when db config is not loaded
         return (string) Mage::getConfig()->getNode('default/logger/'.$path);
+    }
+
+    /**
+     * @return array
+     */
+    public function getAllTargets()
+    {
+        if ($this->_targets === NULL) {
+            $this->_targets = explode(',', $this->getLoggerConfig('general/targets'));
+        }
+        return $this->_targets;
     }
 
     /**
@@ -62,25 +96,22 @@ class FireGento_Logger_Helper_Data extends Mage_Core_Helper_Abstract
     {
         if ($this->_targetMap === null) {
             $targetMap = $this->getLoggerConfig('general/target_map');
-            if ($targetMap) {
-                $this->_targetMap = @unserialize($targetMap);
+            if ($targetMap && ($targetMap = @unserialize($targetMap))) {
+                $targets = array();
+                foreach ($targetMap as $map) {
+                    if (@preg_match('/^'.$map['pattern'].'$/', $filename)) {
+                        $targets[$map['target']] = (int) $map['backtrace'];
+                        if ((int) $map['stop_on_match']) {
+                            break;
+                        }
+                    }
+                }
+                $this->_targetMap = $targets;
             } else {
                 $this->_targetMap = false;
             }
         }
-        if (! $this->_targetMap) {
-            return null;
-        }
-        $targets = array();
-        foreach ($this->_targetMap as $map) {
-            if (@preg_match('/^'.$map['pattern'].'$/', $filename)) {
-                $targets[$map['target']] = (int) $map['backtrace'];
-                if ((int) $map['stop_on_match']) {
-                    break;
-                }
-            }
-        }
-        return $targets;
+        return $this->_targetMap;
     }
 
     /**
@@ -111,7 +142,7 @@ class FireGento_Logger_Helper_Data extends Mage_Core_Helper_Abstract
         if ( ! $configPath || ! strlen($priority)) {
             $priority = $this->getLoggerConfig(self::XML_PATH_PRIORITY);
         }
-        if ($priority !== null && $priority != Zend_Log::WARN) {
+        if ($priority !== null) {
             $writer->addFilter(new Zend_Log_Filter_Priority((int) $priority));
         }
     }
@@ -125,15 +156,24 @@ class FireGento_Logger_Helper_Data extends Mage_Core_Helper_Abstract
      */
     public function addEventMetadata(&$event, $notAvailable = null, $enableBacktrace = false)
     {
+        $event->setBacktrace($enableBacktrace ? TRUE : $notAvailable);
+
+        // Only add metadata once even if there are multiple targets
+        if ($event->getStoreCode()) {
+            return;
+        }
+
         $event
+            ->setRequestId($this->getRequestId())
             ->setFile($notAvailable)
             ->setLine($notAvailable)
-            ->setBacktrace($notAvailable)
             ->setStoreCode(Mage::app()->getStore()->getCode());
-        if (Mage::app()->getStore()->isAdmin() && isset($_SESSION)) {
+
+        // Add admin user data
+        if (Mage::app()->getStore()->isAdmin() && isset($_SESSION['admin'])) {
             $session = Mage::getSingleton('admin/session');
             if ($session->isLoggedIn()) {
-                $event->setAdminUserId($session->getUserId());
+                $event->setAdminUserId($session->getUser()->getId());
                 $event->setAdminUserName($session->getUser()->getName());
             }
         }
@@ -145,106 +185,84 @@ class FireGento_Logger_Helper_Data extends Mage_Core_Helper_Abstract
             $event->setTimeElapsed((float) sprintf('%d', time() - $_SERVER['REQUEST_TIME']));
         }
 
-        // Find file and line where message originated from and optionally get backtrace lines
-        $basePath = dirname(Mage::getBaseDir()).'/'; // 1 level up in case deployed with symlinks from parent directory
-        $nextIsFirst = false;                        // Skip backtrace frames until we reach Mage::log(Exception)
-        $recordBacktrace = false;
-        $maxBacktraceLines = $enableBacktrace ? (int) $this->getLoggerConfig('general/max_backtrace_lines') : 0;
-        $maxDataLength = $this->getLoggerConfig('general/max_data_length') ?: 1000;
-        $prettyPrint = $this->getLoggerConfig('general/pretty_print') && defined('JSON_PRETTY_PRINT') ? JSON_PRETTY_PRINT : 0;
+        // Add backtrace data as array only for now, populate 'file' and 'line'
+        if ( ! $event->getBacktraceArray()) {
+            // Find file and line where message originated from and optionally get backtrace lines
+            $basePath = dirname(Mage::getBaseDir()).'/'; // 1 level up in case deployed with symlinks from parent directory
+            $nextIsFirst = false;                        // Skip backtrace frames until we reach Mage::log(Exception)
+            $recordBacktrace = false;
 
-        $backtraceFrames = array();
-        if (version_compare(PHP_VERSION, '5.3.6') < 0 ) {
-            $debugBacktrace = debug_backtrace(false);
-        } elseif (version_compare(PHP_VERSION, '5.4.0') < 0) {
-            $debugBacktrace = debug_backtrace(
-                $maxBacktraceLines > 0 ? 0 : DEBUG_BACKTRACE_IGNORE_ARGS
-            );
-        } else {
-            $debugBacktrace = debug_backtrace(
-                $maxBacktraceLines > 0 ? 0 : DEBUG_BACKTRACE_IGNORE_ARGS,
-                $maxBacktraceLines + 10
-            );
-        }
+            $backtraceFrames = array();
+            if (version_compare(PHP_VERSION, '5.4.0') < 0) {
+                $debugBacktrace = debug_backtrace();
+            } else {
+                $debugBacktrace = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT,
+                    $this->_maxBacktraceLines + 10
+                );
+            }
+            array_shift($debugBacktrace); // FireGento_Logger_Helper_Data::addEventMetadata
+            array_shift($debugBacktrace); // FireGento_Logger_Model_*::_write
+            array_shift($debugBacktrace); // Zend_Log_Write_Abstract::write
+            array_shift($debugBacktrace); // FireGento_Logger_Model_Queue::_write
+            array_shift($debugBacktrace); // Zend_Log_Writer_Abstract::write
+            array_shift($debugBacktrace); // Zend_Log::log
+            foreach ($debugBacktrace as $frame) {
+                if (isset($frame['class']) && $frame['class'] == 'Zend_Log' && $frame['function'] == 'log') {
+                    array_shift($debugBacktrace);
+                    continue;
+                }
+                if (($nextIsFirst && $frame['function'] == 'logException')
+                    || (
+                        isset($frame['type'])
+                        && $frame['type'] == '::'
+                        && $frame['class'] == 'Mage'
+                        && substr($frame['function'], 0, 3) == 'log'
+                    )
+                ) {
+                    if (isset($frame['file']) && isset($frame['line'])) {
+                        $event
+                            ->setFile(str_replace($basePath, '', $frame['file']))
+                            ->setLine($frame['line']);
+                        if ($this->_maxBacktraceLines) {
+                            $backtraceFrames = array($frame);
+                        } elseif ($nextIsFirst) {
+                            break;
+                        } else {
+                            continue;
+                        }
+                    }
 
-        foreach ($debugBacktrace as $frame) {
-            if (($nextIsFirst && $frame['function'] == 'logException')
-                || (
-                    isset($frame['type'])
-                    && $frame['type'] == '::'
-                    && $frame['class'] == 'Mage'
-                    && substr($frame['function'], 0, 3) == 'log'
-                )
-            ) {
-                if (isset($frame['file']) && isset($frame['line'])) {
-                    $event
-                        ->setFile(str_replace($basePath, '', $frame['file']))
-                        ->setLine($frame['line']);
-                    if ($maxBacktraceLines) {
-                        $backtraceFrames = array();
-                    } elseif ($nextIsFirst) {
-                        break;
-                    } else {
+                    // Don't record backtrace for Mage::logException
+                    if ($frame['function'] == 'logException') {
+                        if (isset($frame['args'][0])) {
+                            $event->setException($frame['args'][0]);
+                        }
                         continue;
                     }
+
+                    $nextIsFirst = true;
+                    $recordBacktrace = true;
+                    continue;
                 }
 
-                // Don't record backtrace for Mage::logException
-                if ($frame['function'] == 'logException') {
-                    break;
-                }
-
-                $nextIsFirst = true;
-                $recordBacktrace = true;
-                continue;
-            }
-
-            if ($recordBacktrace) {
-                if (count($backtraceFrames) >= $maxBacktraceLines) {
-                    break;
-                }
-                $backtraceFrames[] = $frame;
-                continue;
-            }
-        }
-
-        if ($backtraceFrames) {
-            $backtrace = array();
-            foreach ($backtraceFrames as $index => $frame) {
-                // Set file
-                if (empty($frame['file'])) {
-                    $frame['file'] = 'unknown_file';
-                } else {
-                    $frame['file'] = str_replace($basePath, '', $frame['file']);
-                }
-
-                // Set line
-                if (empty($frame['line'])) {
-                    $frame['line'] = 0;
-                }
-
-                $function = (isset($frame['class']) ? "{$frame['class']}{$frame['type']}":'').$frame['function'];
-                $args = array();
-                if (isset($frame['args'])) {
-                    foreach ($frame['args'] as $value) {
-                        $args[] = (is_object($value)
-                            ? get_class($value)
-                            : ( is_array($value)
-                                ? 'array('.count($value).')'
-                                : ( is_string($value)
-                                    ? "'".(strlen($value) > 100 ? "'".substr($value, 0, 100)."...'" : $value)."'"
-                                    : gettype($value)."($value)"
-                                )
-                            )
-                        );
+                if ($recordBacktrace) {
+                    if (count($backtraceFrames) >= $this->_maxBacktraceLines) {
+                        break;
                     }
+
+                    // Avoid exposing passwords in backtrace
+                    if (preg_match('/^(login|authenticate|setPassword|validatePassword)$/', $frame['function'])) {
+                        foreach ($frame['args'] as &$arg) {
+                            if (is_string($arg)) {
+                                $arg = '**redacted**';
+                            }
+                        }
+                    }
+
+                    $backtraceFrames[] = $frame;
                 }
-
-                $args = implode(', ', $args);
-                $backtrace[] = "#{$index} {$frame['file']}:{$frame['line']} $function($args)";
             }
-
-            $event->setBacktrace(implode("\n", $backtrace));
+            $event->setBacktraceArray($backtraceFrames);
         }
 
         if (!empty($_SERVER['REQUEST_METHOD'])) {
@@ -274,22 +292,22 @@ class FireGento_Logger_Helper_Data extends Mage_Core_Helper_Abstract
         // Fetch request data
         $requestData = array();
         if (!empty($_GET)) {
-            $requestData[] = '  GET|'.substr(@json_encode($this->filterSensibleData($_GET), $prettyPrint), 0, $maxDataLength);
+            $requestData[] = '  GET|'.substr(@json_encode($this->filterSensibleData($_GET), $this->_prettyPrint), 0, $this->_maxDataLength);
         }
         if (!empty($_POST)) {
-            $requestData[] = '  POST|'.substr(@json_encode($this->filterSensibleData($_POST), $prettyPrint), 0, $maxDataLength);
+            $requestData[] = '  POST|'.substr(@json_encode($this->filterSensibleData($_POST), $this->_prettyPrint), 0, $this->_maxDataLength);
         }
         if (!empty($_FILES)) {
-            $requestData[] = '  FILES|'.substr(@json_encode($_FILES, $prettyPrint), 0, $maxDataLength);
+            $requestData[] = '  FILES|'.substr(@json_encode($_FILES, $this->_prettyPrint), 0, $this->_maxDataLength);
         }
         if (Mage::registry('raw_post_data')) {
-            $requestData[] = '  RAWPOST|'.substr(Mage::registry('raw_post_data'), 0, $maxDataLength);
+            $requestData[] = '  RAWPOST|'.substr(Mage::registry('raw_post_data'), 0, $this->_maxDataLength);
         }
         $event->setRequestData($requestData ? implode("\n", $requestData) : $notAvailable);
 
         // Add session data if enabled
-        if ($this->getLoggerConfig('general/add_session_data')) {
-            $event->setSessionData(empty($_SESSION) ? $notAvailable : substr(@json_encode($_SESSION, $prettyPrint), 0, $maxDataLength));
+        if ($this->_addSessionData) {
+            $event->setSessionData(empty($_SESSION) ? $notAvailable : substr(@json_encode($_SESSION, $this->_prettyPrint), 0, $this->_maxDataLength));
         }
 
         if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
@@ -317,9 +335,7 @@ class FireGento_Logger_Helper_Data extends Mage_Core_Helper_Abstract
     private function filterSensibleData($data)
     {
         if (is_array($data)) {
-            $keysToFilter = explode("\n",
-                $this->getLoggerConfig('general/filter_request_data'));
-            foreach ($keysToFilter as $key) {
+            foreach ($this->_keysToFilter as $key) {
                 $key = trim($key);
                 if ($key !== '') {
                     $subkeys = explode('.', $key);

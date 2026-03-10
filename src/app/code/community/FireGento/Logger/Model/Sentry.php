@@ -118,7 +118,7 @@ class FireGento_Logger_Model_Sentry extends FireGento_Logger_Model_Abstract
         // (as HTML comments via Magento's developer mode renderer).
         $options = [
             'dsn'         => $dsn,
-            'error_types' => E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE & ~E_USER_NOTICE & ~E_STRICT,
+            'error_types' => E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE & ~E_USER_NOTICE & ~2048, // 2048 = E_STRICT (removed in PHP 8)
         ];
 
         \Sentry\init($options);

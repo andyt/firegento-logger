@@ -112,7 +112,17 @@ class FireGento_Logger_Model_Sentry extends FireGento_Logger_Model_Abstract
         }
         require_once $autoloader;
 
-        \Sentry\init(['dsn' => $dsn]);
+        $options = ['dsn' => $dsn];
+
+        // In production, exclude deprecations and notices from Sentry's PHP error handler
+        // so they don't get converted to ErrorExceptions (which trigger Ignition rendering
+        // and break page output). In development the default behaviour is preserved —
+        // Ignition renders them visually, which is useful for catching PHP 8 issues.
+        if (getenv('SENTRY_ENVIRONMENT') === 'production') {
+            $options['error_types'] = E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE & ~E_USER_NOTICE & ~E_STRICT;
+        }
+
+        \Sentry\init($options);
 
         return self::$_ready = true;
     }

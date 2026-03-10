@@ -76,6 +76,16 @@ class FireGento_Logger_Model_Sentry extends FireGento_Logger_Model_Abstract
     }
 
     /**
+     * Public entry point called by Observer::initLoggerClient() early in the request.
+     *
+     * @return bool true if SDK is ready to receive events
+     */
+    public function init(): bool
+    {
+        return $this->_initSentry();
+    }
+
+    /**
      * Initialise the Sentry SDK once per process.
      *
      * Expects the sentry/sentry v4 package to be available via Composer.

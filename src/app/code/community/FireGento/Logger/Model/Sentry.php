@@ -112,13 +112,19 @@ class FireGento_Logger_Model_Sentry extends FireGento_Logger_Model_Abstract
         }
         require_once $autoloader;
 
-        // Exclude deprecations and notices from Sentry's PHP error handler in all environments.
-        // Without this, Sentry converts E_DEPRECATED to ErrorException, which crashes Magento
-        // blocks silently. PHP's native error_reporting still surfaces them in dev mode
-        // (as HTML comments via Magento's developer mode renderer).
+        // Restrict Sentry's PHP error handler to fatal errors only.
+        //
+        // Sentry\init() registers a PHP error handler that converts PHP errors into
+        // ErrorExceptions. If E_WARNING or similar are included, Magento silently catches
+        // those ErrorExceptions inside toHtml() (non-developer mode) and returns empty blocks.
+        // The Magento logger integration already routes exceptions to Sentry via _write(),
+        // so we only need the SDK's own handler to cover fatal errors that bypass that path.
+        //
+        // Note: E_STRICT (2048) was removed in PHP 8 — referencing the constant itself
+        // triggers E_DEPRECATED, so it is intentionally omitted here.
         $options = [
             'dsn'         => $dsn,
-            'error_types' => E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE & ~E_USER_NOTICE & ~2048, // 2048 = E_STRICT (removed in PHP 8)
+            'error_types' => E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR,
         ];
 
         \Sentry\init($options);

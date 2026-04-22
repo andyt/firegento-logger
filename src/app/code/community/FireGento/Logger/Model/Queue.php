@@ -22,12 +22,31 @@
  * This writer is the one actually used by Magento. It acts as a proxy to support one or more writers
  * set from the config and optionally as a "queue" to hold all events until shutdown.
  *
+ * Implements Monolog\Handler\HandlerInterface for compatibility with OpenMage 20.17+, which
+ * replaced Zend_Log with Monolog for the core logging path. The class continues to extend
+ * Zend_Log_Writer_Abstract so that downstream writers (Sentry, Papertrail, etc.) can remain
+ * Zend_Log-based — this class bridges between the two systems.
+ *
  * @category FireGento
  * @package  FireGento_Logger
  * @author   FireGento Team <team@firegento.com>
  */
-class FireGento_Logger_Model_Queue extends Zend_Log_Writer_Abstract
+class FireGento_Logger_Model_Queue extends Zend_Log_Writer_Abstract implements \Monolog\Handler\HandlerInterface
 {
+    /**
+     * Maps Monolog level integer values to Zend_Log priority integers.
+     */
+    private static array $_monologToZend = [
+        100 => 7, // Debug
+        200 => 6, // Info
+        250 => 5, // Notice
+        300 => 4, // Warning
+        400 => 3, // Error
+        500 => 2, // Critical
+        550 => 1, // Alert
+        600 => 0, // Emergency
+    ];
+
     /**
      * @var Zend_Log_Writer_Abstract[]
      */
@@ -54,12 +73,23 @@ class FireGento_Logger_Model_Queue extends Zend_Log_Writer_Abstract
     protected static $_simpleFormatter;
 
     /**
-     * Class constructor
-     *
-     * @param string $filename Filename
+     * @var \Monolog\Level
      */
-    public function __construct($filename)
+    private \Monolog\Level $_level;
+
+    /**
+     * Class constructor.
+     *
+     * Accepts the same signature as Mage_Core_Helper_Log::getHandler() uses when
+     * instantiating the configured writer_model: (string $logFile, Level $logLevel).
+     *
+     * @param string         $filename Filename (may be a full path or empty)
+     * @param \Monolog\Level $logLevel Minimum level to handle (Monolog)
+     */
+    public function __construct(string $filename = '', \Monolog\Level $logLevel = \Monolog\Level::Debug)
     {
+        $this->_level = $logLevel;
+
         /** @var $helper FireGento_Logger_Helper_Data */
         $helper = Mage::helper('firegento_logger');;
 
@@ -92,6 +122,78 @@ class FireGento_Logger_Model_Queue extends Zend_Log_Writer_Abstract
         $this->_useQueue = (boolean) $helper->getLoggerConfig('general/use_queue');
 
     }
+
+    // -------------------------------------------------------------------------
+    // Monolog\Handler\HandlerInterface
+    // -------------------------------------------------------------------------
+
+    /**
+     * {@inheritdoc}
+     */
+    public function isHandling(\Monolog\LogRecord $record): bool
+    {
+        return $record->level->value >= $this->_level->value;
+    }
+
+    /**
+     * Handle a Monolog log record by converting it to a FireGento event and
+     * dispatching it to the configured writers.
+     *
+     * {@inheritdoc}
+     */
+    public function handle(\Monolog\LogRecord $record): bool
+    {
+        if (!$this->isHandling($record)) {
+            return false;
+        }
+
+        $zendPriority = self::$_monologToZend[$record->level->value] ?? 3 /* Zend_Log::ERR */;
+
+        $eventArray = [
+            'message'      => $record->message,
+            'priority'     => $zendPriority,
+            'priorityName' => strtoupper($record->level->getName()),
+            'timestamp'    => $record->datetime->format('Y-m-d\TH:i:sP'),
+        ];
+
+        /** @var FireGento_Logger_Model_Event $event */
+        $event = Mage::helper('firegento_logger')->getEventObjectFromArray($eventArray);
+
+        if ($this->_useQueue) {
+            $this->_loggerCache[] = $event;
+        } else {
+            foreach ($this->_writers as $writer) {
+                $writer->write($event);
+            }
+        }
+
+        // Return false to allow other Monolog handlers in the stack to process too.
+        return false;
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function handleBatch(array $records): void
+    {
+        foreach ($records as $record) {
+            $this->handle($record);
+        }
+    }
+
+    /**
+     * Flush the queue and shut down all writers.
+     *
+     * Called by Monolog when the handler is closed, and also at Magento shutdown.
+     */
+    public function close(): void
+    {
+        $this->shutdown();
+    }
+
+    // -------------------------------------------------------------------------
+    // Zend_Log_Writer_Abstract (legacy path — called if Zend_Log is used directly)
+    // -------------------------------------------------------------------------
 
     /**
      * Write a message to the log.

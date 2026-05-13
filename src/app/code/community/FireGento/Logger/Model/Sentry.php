@@ -147,6 +147,10 @@ class FireGento_Logger_Model_Sentry extends FireGento_Logger_Model_Abstract
                 return;
             }
 
+            if ($this->_shouldSkip($event)) {
+                return;
+            }
+
             if (!isset($event['priority']) || $event['priority'] === Zend_Log::ERR) {
                 $this->_assumePriorityByMessage($event);
             }
@@ -195,6 +199,26 @@ class FireGento_Logger_Model_Sentry extends FireGento_Logger_Model_Abstract
         } catch (Exception $e) {
             throw new Zend_Log_Exception($e->getMessage(), $e->getCode());
         }
+    }
+
+    /**
+     * Return true if this event should be silently dropped and not sent to Sentry.
+     *
+     * @param FireGento_Logger_Model_Event $event
+     * @return bool
+     */
+    protected function _shouldSkip($event): bool
+    {
+        $exception = $event->getException();
+        if (!$exception) {
+            return false;
+        }
+        // Base Exception with an empty message is used as control-flow in core
+        // controllers (e.g. confirmationAction "customer not found") — never a bug.
+        if (get_class($exception) === 'Exception' && $exception->getMessage() === '') {
+            return true;
+        }
+        return false;
     }
 
     /**

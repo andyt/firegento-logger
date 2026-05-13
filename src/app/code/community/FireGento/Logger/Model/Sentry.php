@@ -218,6 +218,24 @@ class FireGento_Logger_Model_Sentry extends FireGento_Logger_Model_Abstract
         if (get_class($exception) === 'Exception' && $exception->getMessage() === '') {
             return true;
         }
+        // Mage_Core_Exception from Stripe checkout: either 3DS signal or card decline.
+        // Both are expected user-facing outcomes surfaced deliberately by the extension.
+        if ($exception instanceof Mage_Core_Exception) {
+            // 3DS: Stripe signals authentication required via this message prefix;
+            // the Stripe JS handles it — it never represents an application error.
+            if (strpos($exception->getMessage(), 'Authentication Required:') === 0) {
+                return true;
+            }
+            // Card decline: Stripe\Error\Card is converted to Mage_Core_Exception by
+            // maskException() — identifiable by that frame appearing in the trace.
+            foreach (array_slice($exception->getTrace(), 0, 5) as $frame) {
+                if (($frame['class'] ?? '') === 'Stripe_Payments_Helper_Data'
+                    && ($frame['function'] ?? '') === 'maskException'
+                ) {
+                    return true;
+                }
+            }
+        }
         return false;
     }
 

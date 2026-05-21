@@ -108,6 +108,9 @@ class FireGento_Logger_Model_Queue extends Zend_Log_Writer_Abstract implements \
                 $class = (string) Mage::app()->getConfig()->getNode('global/log/core/writer_models/'.$target.'/class');
                 if ($class) {
                     $writer = new $class($filename);
+                    // Set formatter now so the Monolog path (handle()) also gets
+                    // the correct formatter, not just the Zend_Log path (setFormatter()).
+                    $writer->setFormatter(self::getFormatter($class !== 'Zend_Log_Writer_Stream'));
                     //add filter to target
                     $helper->addPriorityFilter($writer, $target.'/priority');
                     //add backtrace if you need if support is enabled

@@ -209,32 +209,27 @@ class FireGento_Logger_Model_Sentry extends FireGento_Logger_Model_Abstract
      */
     protected function _shouldSkip($event): bool
     {
-        $exception = $event->getException();
-        if (!$exception) {
-            return false;
-        }
-        // Base Exception with an empty message is used as control-flow in core
-        // controllers (e.g. confirmationAction "customer not found") — never a bug.
-        if (get_class($exception) === 'Exception' && $exception->getMessage() === '') {
+        // OpenMage 20.17+ routes Mage::logException() through Monolog, which serialises
+        // the exception via __toString() — the exception object is never attached to the
+        // event. Match against the message string instead.
+        return $this->_shouldSkipStripeMessage((string) $event['message']);
+    }
+
+    /**
+     * True if the serialised exception message indicates an expected Stripe user-facing
+     * outcome (3DS authentication signal or card decline) that should not alert in Sentry.
+     */
+    protected function _shouldSkipStripeMessage(string $message): bool
+    {
+        // 3DS: Stripe signals authentication required via Mage_Core_Exception; the Stripe
+        // JS handles it client-side — it never represents an application error.
+        if (strpos($message, 'Mage_Core_Exception: Authentication Required:') !== false) {
             return true;
         }
-        // Mage_Core_Exception from Stripe checkout: either 3DS signal or card decline.
-        // Both are expected user-facing outcomes surfaced deliberately by the extension.
-        if ($exception instanceof Mage_Core_Exception) {
-            // 3DS: Stripe signals authentication required via this message prefix;
-            // the Stripe JS handles it — it never represents an application error.
-            if (strpos($exception->getMessage(), 'Authentication Required:') === 0) {
-                return true;
-            }
-            // Card decline: Stripe\Error\Card is converted to Mage_Core_Exception by
-            // maskException() — identifiable by that frame appearing in the trace.
-            foreach (array_slice($exception->getTrace(), 0, 5) as $frame) {
-                if (($frame['class'] ?? '') === 'Stripe_Payments_Helper_Data'
-                    && ($frame['function'] ?? '') === 'maskException'
-                ) {
-                    return true;
-                }
-            }
+        // Card decline: Stripe\Error\Card is converted to Mage_Core_Exception by
+        // maskException() — identifiable by that frame in the __toString() stack trace.
+        if (strpos($message, 'Stripe_Payments_Helper_Data->maskException(') !== false) {
+            return true;
         }
         return false;
     }

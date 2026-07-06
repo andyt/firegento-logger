@@ -31,7 +31,7 @@ class FireGento_Logger_Helper_Data extends Mage_Core_Helper_Abstract
     const XML_PATH_MAX_DAYS = 'db/max_days_to_keep';
 
     protected $_targets;
-    protected $_targetMap;
+    protected $_targetMap = [];
     protected $_notificationRules;
     protected $_maxBacktraceLines;
     protected $_maxDataLength;
@@ -94,11 +94,12 @@ class FireGento_Logger_Helper_Data extends Mage_Core_Helper_Abstract
      */
     public function getMappedTargets($filename)
     {
-        if ($this->_targetMap === null) {
-            $targetMap = $this->getLoggerConfig('general/target_map');
-            if ($targetMap && ($targetMap = @unserialize($targetMap))) {
+        if (!array_key_exists($filename, $this->_targetMap)) {
+            $rawMap = $this->getLoggerConfig('general/target_map');
+            $rawMap = $rawMap ? @unserialize($rawMap) : null;
+            if ($rawMap) {
                 $targets = array();
-                foreach ($targetMap as $map) {
+                foreach ($rawMap as $map) {
                     if (@preg_match('/^'.$map['pattern'].'$/', $filename)) {
                         $targets[$map['target']] = (int) $map['backtrace'];
                         if ((int) $map['stop_on_match']) {
@@ -106,12 +107,13 @@ class FireGento_Logger_Helper_Data extends Mage_Core_Helper_Abstract
                         }
                     }
                 }
-                $this->_targetMap = $targets;
+                // No rule matched → fall back to all targets (return false)
+                $this->_targetMap[$filename] = $targets ?: false;
             } else {
-                $this->_targetMap = false;
+                $this->_targetMap[$filename] = false;
             }
         }
-        return $this->_targetMap;
+        return $this->_targetMap[$filename];
     }
 
     /**
